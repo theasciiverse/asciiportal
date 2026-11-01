@@ -38,4 +38,10 @@ int pollevent ();
 // true: make calls to getinput blocking.
 void setblocking(bool);
 
+#ifdef __NOSDL__
+// Set up and restore the terminal keyboard (call after initscr, before endwin).
+void input_init ();
+void input_end ();
+#endif
+
 #endif // AP_INPUT_H_INCLUDED

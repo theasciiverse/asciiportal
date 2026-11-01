@@ -39,6 +39,7 @@
 using namespace std;
 
 #include "ap_draw.h"
+#include "ap_input.h"
 
 #ifndef __NOSDL__
 #include "SDL/SDL.h"
@@ -227,14 +228,14 @@ bool displaystats (level const & lvl) {
 
   refresh ();
   napms (500);
-  nodelay(stdscr,0);
-  //while (!(getch() == ERR));
-  switch (getch()) {
+  flushinput();
+  setblocking(true);
+  int input = getinput();
+  setblocking(false);
+  switch (input) {
     case 'R' : case 'r':
-      nodelay(stdscr,1);
       return 0;
     default :
-      nodelay(stdscr,1);
       return 1;
   }
 }
@@ -594,6 +595,10 @@ void graphics_init (bool fullscreen, int height, int width, bool usePureAscii)
   noecho();
   keypad(stdscr,1);
   nodelay(stdscr,1);
+#ifdef __NOSDL__
+  refresh();     // enter the alternate screen before talking to the terminal
+  input_init();
+#endif
   srand (time (NULL));
 #ifdef PDCURSES
   PDC_set_title("Cymon's Games - ASCIIPortal " AP_VERSION);
@@ -605,6 +610,9 @@ void graphics_init (bool fullscreen, int height, int width, bool usePureAscii)
 }
 
 void graphics_deinit () {
+#ifdef __NOSDL__
+  input_end();
+#endif
   endwin ();
 #ifndef __NOSDL__
 //  SDL_Quit();

@@ -31,6 +31,8 @@
 #include <vector>
 #include <ctime>
 #include <cmath>
+#include <cstring>
+#include <cctype>
 using namespace std;
 
 #include "ap_input.h"
@@ -130,12 +132,256 @@ static struct
 };
 #endif
 
+#ifdef __NOSDL__
+// Keyboard input for the plain terminal build.
+//
+// The SDL build knows when a key goes up, so a held key repeats once per
+// game beat until it is released. A plain terminal only sends characters.
+// Where the terminal speaks the kitty keyboard protocol (kitty, foot,
+// WezTerm, Ghostty, Alacritty, iTerm2, ...) we ask it for press and
+// release events and get the same behaviour as SDL. Elsewhere we queue the
+// keys, so quick taps between two beats are not lost, and fold autorepeat
+// into one step per beat.
+
+#include <deque>
+#include <csignal>
+#include <unistd.h>
+
+static bool kitty = false;          // terminal reports press/release
+static bool blocking_mode = false;  // getinput() waits for a key
+static std::deque<int> presses;     // key presses not yet given to the game
+static int held = ERR;              // key held down (kitty mode only)
+static int held_code = 0;           // its unshifted key code
+
+static const unsigned MAX_QUEUED = 8;
+
+// Keys the SDL build does not repeat while held.
+static bool repeatable (int key) {
+  switch (key) {
+  case ' ': case '\n': case 'c': case 'C': case 'x': case 'X':
+  case 'z': case 'Z': case '+': case '-':
+    return false;
+  }
+  return true;
+}
+
+static void term_write (const char *s) {
+  size_t n = strlen(s);
+  while (n > 0) {
+    ssize_t w = write(STDOUT_FILENO, s, n);
+    if (w <= 0) return;
+    s += w; n -= w;
+  }
+}
+
+// One byte from the terminal, waiting up to ms milliseconds (-1: forever).
+static int readbyte (int ms) {
+  timeout(ms);
+  return getch();
+}
+
+static void push_press (int key) {
+  if (presses.size() < MAX_QUEUED) presses.push_back(key);
+}
+
+// Translate a kitty "CSI ... u/~/letter" key report into a curses key.
+static int kitty_key (int code, int shifted, int mods, char final) {
+  bool shift = mods & 1, ctrl = mods & 4;
+  if (final == 'u') {
+    if (ctrl && (code == 'c' || code == 'C')) { // keep Ctrl+C working
+      input_end();
+      raise(SIGINT);
+      return ERR;
+    }
+    if (code >= 57399 && code <= 57408) return '0' + (code - 57399); // keypad digits
+    switch (code) {
+    case 13: case 57414: return '\n';
+    case 27: return 27;
+    case 9: return shift ? KEY_BTAB : '\t';
+    case 127: return KEY_BACKSPACE;
+    case 57409: return '.';
+    case 57410: return '/';
+    case 57411: return '*';
+    case 57412: return '-';
+    case 57413: return '+';
+    case 57417: return KEY_LEFT;
+    case 57418: return KEY_RIGHT;
+    case 57419: return KEY_UP;
+    case 57420: return KEY_DOWN;
+    case 57421: return KEY_PPAGE;
+    case 57422: return KEY_NPAGE;
+    case 57423: return KEY_HOME;
+    case 57424: return KEY_END;
+    }
+    if (code >= 57344) return ERR; // modifier keys and other functional keys
+    if (shift && shifted) return shifted;
+    if (shift && code >= 'a' && code <= 'z') return code - 'a' + 'A';
+    return code;
+  }
+  if (final == '~') {
+    switch (code) {
+    case 2: return KEY_IC;
+    case 3: return KEY_DC;
+    case 5: return KEY_PPAGE;
+    case 6: return KEY_NPAGE;
+    case 7: return KEY_HOME;
+    case 8: return KEY_END;
+    case 11: return KEY_F(1);
+    case 12: return KEY_F(2);
+    case 13: return KEY_F(3);
+    case 14: return KEY_F(4);
+    case 15: return KEY_F(5);
+    case 17: return KEY_F(6);
+    case 18: return KEY_F(7);
+    case 19: return KEY_F(8);
+    case 20: return KEY_F(9);
+    case 21: return KEY_F(10);
+    case 23: return KEY_F(11);
+    case 24: return KEY_F(12);
+    }
+    return ERR;
+  }
+  switch (final) {
+  case 'A': return KEY_UP;
+  case 'B': return KEY_DOWN;
+  case 'C': return KEY_RIGHT;
+  case 'D': return KEY_LEFT;
+  case 'H': return KEY_HOME;
+  case 'F': return KEY_END;
+  case 'P': return KEY_F(1);
+  case 'Q': return KEY_F(2);
+  case 'R': return KEY_F(3);
+  case 'S': return KEY_F(4);
+  }
+  return ERR;
+}
+
+// Read one kitty key report starting after ESC; update presses/held.
+static void kitty_event () {
+  int c = readbyte(50);
+  if (c == ERR) { push_press(27); return; }
+  if (c == 'O') { // SS3: F1-F4, arrows
+    int f = readbyte(50);
+    int key = (f == ERR) ? ERR : kitty_key(1, 0, 0, (char)f);
+    if (key != ERR) push_press(key);
+    return;
+  }
+  if (c != '[') return;
+
+  // parameters: code[:shifted[:base]] ; mods[:event] ; text
+  std::string params;
+  char final = 0;
+  for (;;) {
+    c = readbyte(50);
+    if (c == ERR) return;
+    if (c >= 0x40 && c <= 0x7e) { final = (char)c; break; }
+    params += (char)c;
+  }
+  if (!params.empty() && (params[0] == '?' || params[0] == '>')) return; // replies, not keys
+
+  // split into fields (';') and sub-fields (':'); empty means default
+  std::vector<std::vector<std::string> > fields(1, std::vector<std::string>(1));
+  for (size_t i = 0; i < params.size(); i++) {
+    if (params[i] == ';') fields.push_back(std::vector<std::string>(1));
+    else if (params[i] == ':') fields.back().push_back("");
+    else fields.back().back() += params[i];
+  }
+  #define FIELD(f, sub, def) ((fields.size() > (f) && fields[f].size() > (sub) \
+                               && !fields[f][sub].empty()) ? atoi(fields[f][sub].c_str()) : (def))
+  int code = FIELD(0, 0, 1);
+  int shifted = FIELD(0, 1, 0);
+  int mods = (FIELD(1, 0, 1) - 1) & ~(64 | 128);  // drop caps/num lock
+  int event = FIELD(1, 1, 1);                      // 1 press, 2 repeat, 3 release
+  #undef FIELD
+
+  int key = kitty_key(code, shifted, mods, final);
+  if (key == ERR) return;
+  int id = code * 256 + (unsigned char)final;         // the physical key
+
+  if (event == 3) {                                    // release
+    if (id == held_code) held = ERR;
+    return;
+  }
+  if (event == 1) push_press(key);
+  if (repeatable(key) && (event == 1 || held == ERR)) {
+    held = key;
+    held_code = id;
+  } else if (event == 1) {
+    held = ERR;
+  }
+}
+
+// Take everything the terminal has sent so far.
+static void drain (int first_wait) {
+  int wait = first_wait;
+  for (;;) {
+    int c = readbyte(wait);
+    wait = 0;
+    if (c == ERR) break;
+    if (kitty) {
+      if (c == 27) kitty_event();
+      else push_press(c);   // should not happen in kitty mode, but be safe
+    } else {
+      if (c == KEY_RESIZE) continue;
+      // autorepeat arrives as a run of the same key: one step per beat
+      if (!presses.empty() && presses.back() == c) continue;
+      push_press(c);
+    }
+    if (first_wait != 0 && !presses.empty()) break;
+  }
+}
+
+static int term_getinput () {
+  drain(0);
+  if (presses.empty() && held == ERR && blocking_mode) {
+    while (presses.empty()) drain(-1);
+  }
+  int key = ERR;
+  if (!presses.empty()) {
+    key = presses.front();
+    presses.pop_front();
+  } else if (held != ERR) {
+    key = held;
+  }
+  timeout(blocking_mode ? -1 : 0);
+  return key;
+}
+
+void input_init () {
+  set_escdelay(25);
+  if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) return;
+  // Ask for the keyboard protocol flags, then for the device attributes,
+  // which every terminal answers. A flags reply first means kitty support.
+  keypad(stdscr, FALSE);
+  term_write("\033[?u\033[c");
+  bool supported = false;
+  std::string reply;
+  for (int c; (c = readbyte(500)) != ERR; ) {
+    reply += (char)c;
+    if (c == 'u' && reply.find("\033[?") != std::string::npos) supported = true;
+    if (c == 'c' && reply.find("\033[?") != std::string::npos) break;
+  }
+  if (supported) {
+    // 1 disambiguate, 2 event types, 4 alternate keys, 8 all keys as codes
+    term_write("\033[>15u");
+    kitty = true;
+  } else {
+    keypad(stdscr, TRUE);
+  }
+  timeout(0);
+}
+
+void input_end () {
+  if (kitty) {
+    term_write("\033[<u");
+    kitty = false;
+  }
+}
+#endif // __NOSDL__
+
 int processevent () { // Convert keys down to PDC key commands. Introduces priority if multiple keys are pressed.
 #ifdef __NOSDL__
-  //TODO: fix the nasty delay with standard curses
-  int tmp = getch();
-  flushinput();
-  return tmp;
+  return term_getinput();
 #else
   int key = oldkey;
   bool ismouseevent = false;
@@ -269,8 +515,13 @@ int getinput() {
 void flushinput () {
 #ifndef __NOSDL__
   oldkey = -1;
-#endif
   flushinp();
+#else
+  drain(0);  // read what is there, so key releases are not lost
+  presses.clear();
+  held = ERR;
+  timeout(blocking_mode ? -1 : 0);
+#endif
 }
 
 /* List of SDL keystates you could be checking:
@@ -530,7 +781,9 @@ void restms(int mils) { // a sort of busy wait to catch keyboard input
 
 int pollevent () {
 #ifdef __NOSDL__
-  return !(getch() == ERR);
+  drain(0);  // like SDL, keep the key for the next getinput()
+  timeout(blocking_mode ? -1 : 0);
+  return !presses.empty() || held != ERR;
 #else
   if (!hasevent) hasevent = SDL_PollEvent( &event );
  return hasevent;
@@ -541,9 +794,7 @@ void setblocking(bool _blocking) {
 #ifndef __NOSDL__
   blocking = _blocking;
 #else
-  if (_blocking)
-    nodelay(stdscr, 0); // blocking mode
-  else
-    nodelay(stdscr, 1); // non-blocking mode
+  blocking_mode = _blocking;
+  timeout(blocking_mode ? -1 : 0);
 #endif
 }
