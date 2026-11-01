@@ -1,0 +1,6 @@
+stage/
+dist/
+build/
+/asciiportal
+/asciiportal-nosdl
+*.o

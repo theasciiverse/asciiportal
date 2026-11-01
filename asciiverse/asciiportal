@@ -1,0 +1,7 @@
+#!/bin/sh
+# Starts ASCIIpOrtal from an av install. The game finds its maps next to
+# its own binary, in lib/; saves and custom map packs go to ~/.asciiportal.
+# av links ~/.local/bin/asciiportal to this file, so follow that link first.
+self=$(readlink "$0" 2>/dev/null || printf '%s' "$0")
+dir=$(cd "$(dirname "$self")" && pwd)
+exec "$dir/lib/asciiportal" "$@"
