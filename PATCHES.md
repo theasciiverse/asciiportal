@@ -32,10 +32,16 @@ is upstream's, including all the levels and map packs.
   - Esc (pause menu) responds after 25 ms instead of one second.
   - The level-complete screen now reads keys through the same code.
 
+- **Terminal version builds without SDL installed.** `src/main.cpp`
+  included `SDL/SDL.h` even with `__NOSDL__`, though it uses nothing from
+  it then; the include is now skipped in the terminal version, as every
+  other source file already does. (`src/main.cpp`)
+
 ## Packaging
 
 - Built from `asciiverse/build.sh` rather than upstream's Makefiles. It
-  compiles the same sources with `-D__NOSDL__ -D__NOSOUND__` and links
+  compiles the same sources as C++17 (Apple's compiler would otherwise
+  use C++98, too old for yaml-cpp) with `-D__NOSDL__ -D__NOSOUND__` and links
   yaml-cpp 0.8.0, built from source, statically.
 - The av archive holds a start script, the binary in `lib/` and the map
   packs in `lib/maps/`. The music files are left out, since this build

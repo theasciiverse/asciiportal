@@ -46,7 +46,7 @@ fi
 
 rm -f asciiportal
 # shellcheck disable=SC2086
-$cxx -O2 -DAP_VERSION="\"$AP_VERSION\"" -D__NOSDL__ -D__NOSOUND__ \
+$cxx -std=gnu++17 -O2 -DAP_VERSION="\"$AP_VERSION\"" -D__NOSDL__ -D__NOSOUND__ \
   -D_XOPEN_SOURCE_EXTENDED $yamlinc $cursesinc \
   src/ap_pager.cpp src/ap_object.cpp src/ap_maps.cpp src/ap_filemgr.cpp \
   src/ap_input.cpp src/ap_draw.cpp src/ap_play.cpp src/main.cpp src/menu.cpp \

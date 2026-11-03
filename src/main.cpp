@@ -39,7 +39,9 @@
 #include <libgen.h>
 
 // Necessary to compile on OS X
+#ifndef __NOSDL__
 #include <SDL/SDL.h>
+#endif
 
 using namespace std;
 #include "asciiportal.h"
